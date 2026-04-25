@@ -1,0 +1,39 @@
+Package: adlyseR
+Title: Cross-Channel Ad & Traffic Analysis Toolkit
+Version: 0.0.0.9000
+Authors@R:
+    person("Paul", "Newnes", email = "paul@deducive.com", role = c("aut", "cre"))
+Description: A reusable toolkit for pulling, harmonising, and combining
+    ad performance data from Meta, Google Ads, and LinkedIn, together
+    with GA4 traffic for a campaign's landing pages. Built from working
+    patterns in the NACS Show media-planning project. Each campaign is
+    described by a lightweight config object so the same code can serve
+    multiple clients and campaigns.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends:
+    R (>= 4.1.0)
+Imports:
+    dplyr,
+    tibble,
+    tidyr,
+    purrr,
+    stringr,
+    readr,
+    lubridate,
+    magrittr,
+    fuzzyjoin,
+    yaml,
+    rlang,
+    cli
+Suggests:
+    googleAnalyticsR,
+    rgoogleads,
+    googlesheets4,
+    httr,
+    jsonlite,
+    testthat (>= 3.0.0),
+    withr
+Config/testthat/edition: 3

@@ -1,0 +1,9 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.github$
+^\.gitignore$
+^\.DS_Store$
+^LICENSE\.md$
+^README\.Rmd$
+^docs$
+^_pkgdown\.yml$
