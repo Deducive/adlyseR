@@ -30,5 +30,5 @@ magrittr::`%>%`
 ## references `.data$column` inside dplyr verbs picks it up via the package
 ## NAMESPACE <e2><80><94> silences "no visible binding for global variable '.data'"
 ## from R CMD check without needing per-file imports.
-#' @importFrom rlang .data
+#' @importFrom rlang .data "%||%"
 NULL

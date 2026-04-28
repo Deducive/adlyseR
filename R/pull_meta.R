@@ -1,25 +1,26 @@
 ## Meta (Facebook) ads pull --------------------------------------------------
-## Ported from ns-media-planning/ns_pull_meta.R.
-## Uses fb_insights_convs() from the user's existing functions/ library
-## (or an equivalent facebookadsR wrapper) with time_increment = "7".
+## Calls fetch_meta_insights() (internal) by default. The insights_fn arg
+## remains as an escape hatch for callers who want to plug in an alternative
+## (e.g. a facebookadsR wrapper or a stubbed function in tests).
 
 #' Pull Meta (Facebook) ad performance for a campaign
 #'
-#' @param config       A `campaign_config` object.
+#' @param config       A `campaign_config` object. Reads `meta.account_id`
+#'   and `meta.access_token` (preferred) or falls back to the `FB_AD_ACCOUNT`
+#'   and `FB_TOKEN` environment variables.
 #' @param refresh      Force re-fetch instead of loading from cache.
-#' @param insights_fn  The pulling function. Defaults to
-#'   `fb_insights_convs`, which should be sourced from the user's
-#'   `functions/fb_conversions_function.R` before calling this function. In
-#'   future we may absorb a reference implementation into the package.
+#' @param insights_fn  Optional override for the function that hits Meta's
+#'   API. Defaults to the package-internal [fetch_meta_insights()]. Pass a
+#'   different function if you want to stub the API call (e.g. in tests) or
+#'   plug in a third-party wrapper.
 #'
 #' @return A weekly tibble conforming to the canonical channel schema
 #'   (see [combine_channels()]). The `platform_conversions` column holds
 #'   Meta's pixel-reported conversion count and is NOT comparable to
 #'   other channels' or GA4's conversion counts.
 #'
-#' @details This is a faithful port of `ns_pull_meta.R`. A single API call
-#'   per campaign is made with `time_increment = "7"` so Meta returns
-#'   pre-bucketed weekly rows.
+#' @details A single API call per campaign is made with `time_increment = "7"`
+#'   so Meta returns pre-bucketed weekly rows.
 #'
 #' @export
 pull_meta <- function(config,
@@ -31,34 +32,32 @@ pull_meta <- function(config,
   cached <- archive_load(config, "meta", refresh = refresh)
   if (!is.null(cached)) return(cached)
 
-  insights_fn <- insights_fn %||% tryCatch(
-    get("fb_insights_convs", envir = .GlobalEnv, inherits = TRUE),
-    error = function(e) NULL
-  )
+  ## Default to the package's own fetcher; allow override.
+  insights_fn <- insights_fn %||% fetch_meta_insights
 
-  if (is.null(insights_fn)) {
-    cli::cli_abort(
-      c("Meta pull requires an insights function.",
-        "i" = "Source your existing {.code functions/fb_conversions_function.R} before calling {.fn pull_meta}, or pass {.arg insights_fn} explicitly.")
-    )
-  }
-
+  ## Resolve credentials: YAML first, env vars as fallback.
   meta_cfg <- config$meta
-  ## Coerce empty strings and "REPLACE_ME" placeholders to NULL so the
-  ## %||% fallback to the globals defined by fb_conversions_function.R
-  ## actually fires.
   clean <- function(x) {
     if (is.null(x)) return(NULL)
     if (!is.character(x)) return(x)
     if (!nzchar(x) || grepl("REPLACE_ME", x, fixed = TRUE)) NULL else x
   }
-  fb_account      <- clean(meta_cfg$account_id)   %||% get0("fb_account",      envir = .GlobalEnv)
-  fb_access_token <- clean(meta_cfg$access_token) %||% get0("fb_access_token", envir = .GlobalEnv)
+
+  fb_account <- clean(meta_cfg$account_id) %||%
+    {
+      v <- Sys.getenv("FB_AD_ACCOUNT", unset = "")
+      if (nzchar(v)) v else NULL
+    }
+  fb_access_token <- clean(meta_cfg$access_token) %||%
+    {
+      v <- Sys.getenv("FB_TOKEN", unset = "")
+      if (nzchar(v)) v else NULL
+    }
 
   if (is.null(fb_account) || is.null(fb_access_token)) {
     cli::cli_abort(
       c("Meta config incomplete.",
-        "i" = "Set {.field meta.account_id} and {.field meta.access_token} in YAML, or define {.code fb_account} / {.code fb_access_token} in the global env.")
+        "i" = "Set {.field meta.account_id} and {.field meta.access_token} in YAML, or define {.envvar FB_AD_ACCOUNT} and {.envvar FB_TOKEN} environment variables.")
     )
   }
 

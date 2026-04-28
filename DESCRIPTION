@@ -1,6 +1,6 @@
 Package: adlyseR
 Title: Cross-Channel Ad & Traffic Analysis Toolkit
-Version: 0.0.0.9000
+Version: 0.0.0.9001
 Authors@R:
     person("Paul", "Newnes", email = "paul@deducive.com", role = c("aut", "cre"))
 Description: A reusable toolkit for pulling, harmonising, and combining
@@ -27,12 +27,13 @@ Imports:
     fuzzyjoin,
     yaml,
     rlang,
-    cli
+    cli,
+    httr,
+    data.table
 Suggests:
     googleAnalyticsR,
     rgoogleads,
     googlesheets4,
-    httr,
     jsonlite,
     testthat (>= 3.0.0),
     withr

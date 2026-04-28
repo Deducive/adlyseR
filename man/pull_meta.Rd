@@ -7,14 +7,16 @@
 pull_meta(config, refresh = FALSE, insights_fn = NULL)
 }
 \arguments{
-\item{config}{A \code{campaign_config} object.}
+\item{config}{A \code{campaign_config} object. Reads \code{meta.account_id}
+and \code{meta.access_token} (preferred) or falls back to the \code{FB_AD_ACCOUNT}
+and \code{FB_TOKEN} environment variables.}
 
 \item{refresh}{Force re-fetch instead of loading from cache.}
 
-\item{insights_fn}{The pulling function. Defaults to
-\code{fb_insights_convs}, which should be sourced from the user's
-\code{functions/fb_conversions_function.R} before calling this function. In
-future we may absorb a reference implementation into the package.}
+\item{insights_fn}{Optional override for the function that hits Meta's
+API. Defaults to the package-internal \code{\link[=fetch_meta_insights]{fetch_meta_insights()}}. Pass a
+different function if you want to stub the API call (e.g. in tests) or
+plug in a third-party wrapper.}
 }
 \value{
 A weekly tibble conforming to the canonical channel schema
@@ -26,7 +28,6 @@ other channels' or GA4's conversion counts.
 Pull Meta (Facebook) ad performance for a campaign
 }
 \details{
-This is a faithful port of \code{ns_pull_meta.R}. A single API call
-per campaign is made with \code{time_increment = "7"} so Meta returns
-pre-bucketed weekly rows.
+A single API call per campaign is made with \code{time_increment = "7"}
+so Meta returns pre-bucketed weekly rows.
 }
