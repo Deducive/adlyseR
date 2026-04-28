@@ -53,6 +53,69 @@ combined <- combine_channels(meta, google, li, ga4 = ga4_soi, config = cfg)
 combined$weekly_combined
 ```
 
+## Configuration values and tokens
+
+Campaign settings are read from YAML via `load_campaign_config()`. Values can
+be written directly in the YAML, or read from environment variables with the
+`env:VAR_NAME` form. Prefer environment variables for tokens and local
+credential paths so secrets do not get committed.
+
+```yaml
+name: soi_2026
+start_date: "2026-01-01"
+end_date: "2026-04-15"
+
+meta:
+  account_id: "env:META_ACCOUNT_ID"
+  access_token: "env:META_ACCESS_TOKEN"
+
+google_ads:
+  customer_id: "env:GOOGLE_ADS_CUSTOMER_ID"
+  login_customer_id: "env:GOOGLE_ADS_LOGIN_CUSTOMER_ID"
+
+linkedin:
+  account_id: "env:LINKEDIN_ACCOUNT_ID"
+  campaign_groups:
+    - "688096446"
+  token_file: "env:LINKEDIN_TOKEN_FILE"
+  token_refresh_script: "env:LINKEDIN_REFRESH_SCRIPT"
+
+ga4:
+  property_id: "env:GA4_PROPERTY_ID"
+  service_account_json: "env:GA4_SERVICE_ACCOUNT_JSON"
+  hostnames:
+    - "www.example.com"
+  page_path_prefix: "/SOI/"
+```
+
+Set those variables before loading the config:
+
+```r
+Sys.setenv(
+  META_ACCOUNT_ID = "act_123",
+  META_ACCESS_TOKEN = "EAAB...",
+  GOOGLE_ADS_CUSTOMER_ID = "1234567890",
+  GA4_PROPERTY_ID = "123456789"
+)
+
+cfg <- load_campaign_config("campaigns/soi_2026.yml")
+```
+
+Channel-specific auth still follows each API package's normal setup:
+
+- **Meta:** `meta.account_id` and `meta.access_token` can come from YAML or
+  `env:` values. If omitted, `pull_meta()` falls back to global
+  `fb_account` and `fb_access_token` objects.
+- **Google Ads:** set `google_ads.customer_id` and optionally
+  `google_ads.login_customer_id`; authenticate interactively with
+  `rgoogleads::gads_auth()` once in the R session.
+- **LinkedIn:** set `linkedin.account_id` plus either campaign groups or
+  campaigns. Provide `linkedin.token_file` for a CSV token cache, or
+  `linkedin.token_refresh_script` for a script that defines `a.token`.
+- **GA4:** set `ga4.property_id`. If `ga4.service_account_json` points to a
+  JSON key file, `pull_ga4_*()` authenticates with it; otherwise it uses the
+  existing `googleAnalyticsR::ga_auth()` state.
+
 ## Port status
 
 | Script in ns-media-planning | adlyseR function        | Status        |

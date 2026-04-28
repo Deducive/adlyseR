@@ -29,8 +29,9 @@ build_week_index <- function(config) {
     tibble::enframe(value = "week_start", name = "week_num") %>%
     dplyr::mutate(
       week_end     = .data$week_start + 6L,
-      weeks_to_end = as.integer(
-        ceiling(as.numeric(config$end_date - .data$week_start) / 7)
+      weeks_to_end = pmax(
+        as.integer(ceiling(as.numeric(config$end_date - .data$week_start) / 7)) - 1L,
+        0L
       )
     )
 

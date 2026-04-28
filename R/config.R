@@ -27,7 +27,8 @@ load_campaign_config <- function(path) {
     cli::cli_abort("Campaign config not found: {.path {path}}")
   }
 
-  raw <- yaml::read_yaml(path)
+  raw <- yaml::read_yaml(path) %>%
+    resolve_config_values()
 
   cfg <- list(
     name         = raw$name       %||% tools::file_path_sans_ext(basename(path)),
@@ -96,3 +97,28 @@ print.campaign_config <- function(x, ...) {
 
 #' @noRd
 `%||%` <- function(a, b) if (is.null(a)) b else a
+
+#' @noRd
+resolve_config_values <- function(x) {
+  if (is.list(x)) {
+    return(lapply(x, resolve_config_values))
+  }
+
+  if (!is.character(x) || length(x) != 1L) {
+    return(x)
+  }
+
+  env_var <- sub("^env:", "", x)
+  if (identical(env_var, x)) {
+    return(x)
+  }
+
+  value <- Sys.getenv(env_var, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    cli::cli_abort(
+      "Environment variable {.envvar {env_var}} is referenced by the campaign config but is not set."
+    )
+  }
+
+  value
+}

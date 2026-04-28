@@ -186,9 +186,11 @@ pull_ga4_pagepath <- function(config, refresh = FALSE) {
     "Pulling GA4 page traffic: path prefix {.val {path_prefix}}, {config$start_date} \u2192 {config$end_date}"
   )
 
-  ## ga_data_filter uses a DSL: `field %begins% value`. Using "pagePath" as
-  ## a string avoids needing a ga_meta() call up front to validate the field.
-  page_filter <- googleAnalyticsR::ga_data_filter("pagePath" %begins% path_prefix)
+  page_filter <- googleAnalyticsR::dim_filter(
+    "pagePath",
+    operator = "BEGINS_WITH",
+    expressions = path_prefix
+  )
 
   daily <- tryCatch(
     googleAnalyticsR::ga_data(
