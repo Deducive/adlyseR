@@ -194,6 +194,90 @@ fetch_linkedin_campaign_names <- function(campaign_ids, config, bearer_token) {
     dplyr::filter(.data$campaign_id_lookup %in% campaign_ids)
 }
 
+## ---- Helpers: conversion lookup -------------------------------------------
+
+#' @noRd
+fetch_linkedin_conversion_names <- function(conversion_ids, config, bearer_token) {
+
+  conversion_ids <- conversion_ids[!is.na(conversion_ids) & nzchar(conversion_ids)]
+  if (length(conversion_ids) == 0) {
+    return(tibble::tibble(
+      conversion_id_lookup = character(),
+      conversion_name      = character(),
+      conversion_type      = character(),
+      conversion_method    = character(),
+      conversion_enabled   = logical()
+    ))
+  }
+
+  li_cfg      <- config$linkedin
+  account_id  <- li_cfg$account_id
+  api_version <- li_cfg$api_version %||% "202509"
+  account_urn <- paste0("urn:li:sponsoredAccount:", account_id)
+
+  conversion_names <- tibble::tibble(
+    conversion_id_lookup = character(),
+    conversion_name      = character(),
+    conversion_type      = character(),
+    conversion_method    = character(),
+    conversion_enabled   = logical()
+  )
+  start <- 0L
+  count <- 100L
+
+  repeat {
+    query_string <- paste0(
+      "q=account",
+      "&account=", utils::URLencode(account_urn, reserved = TRUE),
+      "&start=", start,
+      "&count=", count
+    )
+
+    url <- paste0(li_url_base(), "/conversions?", query_string)
+
+    resp <- httr::GET(
+      url,
+      httr::add_headers(.headers = li_headers(bearer_token, api_version))
+    )
+    parsed <- parse_linkedin_content(resp)
+
+    if (httr::status_code(resp) >= 300 || is.null(parsed$parsed$elements)) {
+      cli::cli_alert_warning(
+        "LinkedIn conversion-name lookup failed. Raw body starts: {substr(parsed$raw_text, 1, 200)}"
+      )
+      return(conversion_names)
+    }
+
+    page_names <- parsed$parsed$elements %>%
+      purrr::map_dfr(function(el) {
+        tibble::tibble(
+          conversion_id_lookup = as.character(el$id               %||% NA_character_),
+          conversion_name      = as.character(el$name             %||% NA_character_),
+          conversion_type      = as.character(el$type             %||% NA_character_),
+          conversion_method    = as.character(el$conversionMethod %||% NA_character_),
+          conversion_enabled   = as.logical(el$enabled            %||% NA)
+        )
+      }) %>%
+      dplyr::filter(!is.na(.data$conversion_id_lookup),
+                    !is.na(.data$conversion_name))
+
+    conversion_names <- dplyr::bind_rows(conversion_names, page_names) %>%
+      dplyr::distinct()
+
+    if (all(conversion_ids %in% conversion_names$conversion_id_lookup)) break
+
+    paging <- parsed$parsed$paging
+    returned <- length(parsed$parsed$elements %||% list())
+    total <- paging$total %||% NA_integer_
+    start <- start + count
+    if (returned < count) break
+    if (!is.na(total) && start >= total) break
+  }
+
+  conversion_names %>%
+    dplyr::filter(.data$conversion_id_lookup %in% conversion_ids)
+}
+
 ## ---- Helpers: analytics request ------------------------------------------
 
 #' @noRd
@@ -273,6 +357,70 @@ run_linkedin_request <- function(scope_param, scope_urns, config, bearer_token,
 }
 
 #' @noRd
+## Build and execute one adAnalytics statistics request at campaign/conversion
+## grain. This intentionally returns only conversion metrics, not spend/click
+## metrics, because adding conversion as a pivot changes the row grain.
+run_linkedin_conversion_request <- function(scope_param, scope_urns, config,
+                                            bearer_token, debug = FALSE) {
+
+  li_cfg      <- config$linkedin
+  api_version <- li_cfg$api_version %||% "202509"
+  account_id  <- li_cfg$account_id
+
+  start_d <- config$start_date
+  end_d   <- config$end_date
+
+  account_urn <- paste0("urn:li:sponsoredAccount:", account_id)
+
+  query_string <- paste0(
+    "q=statistics",
+    "&pivots=List(CAMPAIGN,CONVERSION)",
+    "&timeGranularity=DAILY",
+    "&dateRange=(start:(year:", lubridate::year(start_d),
+    ",month:",                   lubridate::month(start_d),
+    ",day:",                     lubridate::day(start_d),
+    "),end:(year:",              lubridate::year(end_d),
+    ",month:",                   lubridate::month(end_d),
+    ",day:",                     lubridate::day(end_d), "))",
+    "&accounts=", build_urn_list(account_urn),
+    "&", scope_param, "=", build_urn_list(scope_urns),
+    "&fields=",
+    paste(
+      c(
+        "pivotValues",
+        "dateRange",
+        "externalWebsiteConversions",
+        "externalWebsitePostClickConversions",
+        "externalWebsitePostViewConversions"
+      ),
+      collapse = ","
+    )
+  )
+
+  url <- paste0(li_url_base(), "/adAnalytics?", query_string)
+  if (isTRUE(debug)) cli::cli_alert_info("LinkedIn conversion request URL: {url}")
+
+  resp <- httr::GET(
+    url,
+    httr::add_headers(.headers = li_headers(bearer_token, api_version))
+  )
+  parsed <- parse_linkedin_content(resp)
+
+  if (isTRUE(debug)) {
+    cli::cli_alert_info(
+      "LinkedIn conversion status {httr::status_code(resp)}; body: {substr(parsed$raw_text, 1, 500)}"
+    )
+  }
+
+  list(
+    status_code = httr::status_code(resp),
+    parsed      = parsed$parsed,
+    raw_text    = parsed$raw_text,
+    url         = url
+  )
+}
+
+#' @noRd
 ## Flatten LinkedIn's nested `elements` array into a daily tibble.
 ## Columns `.scope_kind` / `.scope_value` record how we fetched the row (group
 ## vs campaign scope) <e2><80><94> leading-dot names keep them out of the canonical
@@ -292,6 +440,47 @@ flatten_linkedin_elements <- function(parsed, scope_label, scope_value) {
       externalWebsitePostClickConversions   = as.numeric(el$externalWebsitePostClickConversions %||% 0),
       externalWebsitePostViewConversions    = as.numeric(el$externalWebsitePostViewConversions %||% 0),
       totalEngagements                      = as.numeric(el$totalEngagements %||% 0),
+      event_date = lubridate::make_date(
+        year  = el$dateRange$start$year  %||% NA_integer_,
+        month = el$dateRange$start$month %||% NA_integer_,
+        day   = el$dateRange$start$day   %||% NA_integer_
+      )
+    )
+  })
+
+  if (nrow(out) == 0) {
+    out$.scope_kind  <- character()
+    out$.scope_value <- character()
+  } else {
+    out$.scope_kind  <- scope_label
+    out$.scope_value <- as.character(scope_value)
+  }
+  out
+}
+
+#' @noRd
+## Flatten campaign/conversion pivot rows into daily conversion-rule metrics.
+flatten_linkedin_conversion_elements <- function(parsed, scope_label, scope_value) {
+
+  out <- purrr::map_dfr(parsed$elements, function(el) {
+    pvs <- el$pivotValues %||% character()
+    tibble::tibble(
+      campaign_id_lookup = as.character(readr::parse_number(
+        as.character(pvs[1] %||% NA_character_)
+      )),
+      conversion_id_lookup = as.character(readr::parse_number(
+        as.character(pvs[2] %||% NA_character_)
+      )),
+      conversion_urn = as.character(pvs[2] %||% NA_character_),
+      externalWebsiteConversions = as.numeric(
+        el$externalWebsiteConversions %||% 0
+      ),
+      externalWebsitePostClickConversions = as.numeric(
+        el$externalWebsitePostClickConversions %||% 0
+      ),
+      externalWebsitePostViewConversions = as.numeric(
+        el$externalWebsitePostViewConversions %||% 0
+      ),
       event_date = lubridate::make_date(
         year  = el$dateRange$start$year  %||% NA_integer_,
         month = el$dateRange$start$month %||% NA_integer_,
@@ -373,6 +562,71 @@ fetch_li_scope <- function(scope_label, scope_value, config, bearer_token,
   }
 
   flatten_linkedin_elements(result$parsed, scope_label, scope_value)
+}
+
+#' @noRd
+fetch_li_conversion_scope <- function(scope_label, scope_value, config,
+                                      bearer_token, debug = FALSE) {
+
+  scope_param <- switch(
+    scope_label,
+    campaign_group_id = "campaignGroups",
+    campaign_id       = "campaigns",
+    cli::cli_abort("Unknown LinkedIn scope label: {.val {scope_label}}")
+  )
+  urn_prefix <- switch(
+    scope_label,
+    campaign_group_id = "urn:li:sponsoredCampaignGroup:",
+    campaign_id       = "urn:li:sponsoredCampaign:"
+  )
+  urn <- paste0(urn_prefix, scope_value)
+
+  cli::cli_alert_info(
+    "  Pulling LinkedIn conversions for {scope_label}={scope_value}"
+  )
+
+  result <- tryCatch(
+    run_linkedin_conversion_request(scope_param, urn, config, bearer_token,
+                                    debug = debug),
+    error = function(e) {
+      cli::cli_alert_warning(
+        "LinkedIn conversion request failed for {scope_label}={scope_value}: {conditionMessage(e)}"
+      )
+      NULL
+    }
+  )
+
+  if (is.null(result)) return(tibble::tibble())
+
+  if (result$status_code >= 300) {
+    detail <- result$parsed$message %||%
+      result$parsed$serviceErrorCode %||%
+      "no error body"
+    cli::cli_alert_warning(
+      "LinkedIn conversion HTTP {result$status_code} for {scope_label}={scope_value}. Detail: {detail}"
+    )
+    if (!isTRUE(debug)) {
+      cli::cli_alert_warning(
+        "Raw body starts: {substr(result$raw_text, 1, 300)}"
+      )
+    }
+    return(tibble::tibble())
+  }
+
+  elements <- result$parsed$elements
+  if (is.null(elements) || length(elements) == 0) {
+    cli::cli_alert_warning(
+      "LinkedIn returned 0 conversion rows for {scope_label}={scope_value}."
+    )
+    if (!isTRUE(debug)) {
+      cli::cli_alert_info(
+        "(Re-run with {.code pull_linkedin_conversions(cfg, debug = TRUE)} to see the URL and raw body.)"
+      )
+    }
+    return(tibble::tibble())
+  }
+
+  flatten_linkedin_conversion_elements(result$parsed, scope_label, scope_value)
 }
 
 ## ---- Public entry point ---------------------------------------------------
@@ -524,5 +778,205 @@ pull_linkedin <- function(config, refresh = FALSE, debug = FALSE) {
     enforce_channel_schema("linkedin")
 
   archive_save(config, "linkedin", out)
+  out
+}
+
+#' Pull LinkedIn conversions by conversion rule
+#'
+#' Queries LinkedIn's Marketing API at campaign/conversion grain, aggregating
+#' daily conversion-rule metrics into campaign weeks. This is a companion to
+#' [pull_linkedin()]: it does not include spend, impressions, or clicks because
+#' adding `CONVERSION` as a pivot changes the row grain.
+#'
+#' @param config  A `campaign_config` object. Required: `linkedin.account_id`.
+#'   Scope: at least one of `linkedin.campaign_groups` (vector of group IDs)
+#'   or `linkedin.campaigns` (vector of campaign IDs).
+#'   Optional: `linkedin.api_version` (default `"202509"`),
+#'   `linkedin.token_file`, `linkedin.token_refresh_script`.
+#' @param refresh Force re-fetch instead of loading from cache.
+#' @param debug   If `TRUE`, prints the full request URL and the first 500
+#'   chars of the response body for every scope. Useful for diagnosing
+#'   empty-result cases.
+#'
+#' @return A weekly tibble with campaign and conversion-rule identifiers plus
+#'   `externalWebsiteConversions`, `externalWebsitePostClickConversions`, and
+#'   `externalWebsitePostViewConversions`.
+#'
+#' @export
+pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
+
+  stopifnot(inherits(config, "campaign_config"))
+
+  cached <- archive_load(config, "linkedin_conversions", refresh = refresh)
+  if (!is.null(cached)) return(cached)
+
+  li_cfg <- config$linkedin
+  account_id      <- li_cfg$account_id
+  campaign_groups <- li_cfg$campaign_groups %||% character()
+  campaign_ids    <- li_cfg$campaigns       %||% character()
+
+  empty_out <- function() {
+    tibble::tibble(
+      week_num = integer(),
+      weeks_to_end = integer(),
+      phase = character(),
+      week_start = as.Date(character()),
+      week_end = as.Date(character()),
+      channel = character(),
+      campaign_id = character(),
+      campaign_name = character(),
+      conversion_id = character(),
+      conversion_name = character(),
+      conversion_type = character(),
+      conversion_method = character(),
+      conversion_enabled = logical(),
+      externalWebsiteConversions = numeric(),
+      externalWebsitePostClickConversions = numeric(),
+      externalWebsitePostViewConversions = numeric()
+    )
+  }
+
+  if (is.null(account_id) || !nzchar(account_id)) {
+    cli::cli_alert_warning(
+      "LinkedIn {.field account_id} not set in config. Returning empty tibble."
+    )
+    out <- empty_out()
+    archive_save(config, "linkedin_conversions", out)
+    return(out)
+  }
+
+  if (length(campaign_groups) == 0 && length(campaign_ids) == 0) {
+    cli::cli_alert_warning(
+      "LinkedIn config has neither {.field campaign_groups} nor {.field campaigns}. Returning empty tibble."
+    )
+    out <- empty_out()
+    archive_save(config, "linkedin_conversions", out)
+    return(out)
+  }
+
+  ensure_linkedin_deps()
+  bearer_token <- get_linkedin_access_token(config)
+
+  cli::cli_alert_info(
+    "Pulling LinkedIn conversions: {config$start_date} \u2192 {config$end_date} (account {account_id}, {length(campaign_groups)} group{?s}, {length(campaign_ids)} campaign{?s})"
+  )
+
+  raw_groups <- purrr::map_dfr(
+    campaign_groups,
+    function(g) fetch_li_conversion_scope("campaign_group_id", g, config,
+                                          bearer_token, debug = debug)
+  )
+  raw_campaigns <- purrr::map_dfr(
+    campaign_ids,
+    function(c) fetch_li_conversion_scope("campaign_id", c, config,
+                                          bearer_token, debug = debug)
+  )
+
+  if (nrow(raw_campaigns) > 0 && length(campaign_ids) > 0) {
+    requested <- as.character(campaign_ids)
+    raw_campaigns <- raw_campaigns %>%
+      dplyr::filter(as.character(.data$campaign_id_lookup) %in% requested)
+  }
+
+  raw <- dplyr::bind_rows(raw_groups, raw_campaigns)
+
+  if (nrow(raw) == 0) {
+    cli::cli_alert_warning(
+      "LinkedIn returned no usable conversion rows across all scopes."
+    )
+    out <- empty_out()
+    archive_save(config, "linkedin_conversions", out)
+    return(out)
+  }
+
+  raw <- raw %>%
+    dplyr::mutate(
+      campaign_id_lookup = as.character(.data$campaign_id_lookup),
+      conversion_id_lookup = as.character(.data$conversion_id_lookup)
+    ) %>%
+    dplyr::distinct(
+      .data$campaign_id_lookup, .data$conversion_id_lookup, .data$event_date,
+      .keep_all = TRUE
+    ) %>%
+    dplyr::select(-dplyr::any_of(c(".scope_kind", ".scope_value")))
+
+  campaign_name_tbl <- fetch_linkedin_campaign_names(
+    unique(raw$campaign_id_lookup),
+    config,
+    bearer_token
+  )
+  conversion_name_tbl <- fetch_linkedin_conversion_names(
+    unique(raw$conversion_id_lookup),
+    config,
+    bearer_token
+  )
+
+  raw <- raw %>%
+    dplyr::left_join(campaign_name_tbl, by = "campaign_id_lookup") %>%
+    dplyr::left_join(conversion_name_tbl, by = "conversion_id_lookup") %>%
+    dplyr::rename(
+      campaign_id   = "campaign_id_lookup",
+      conversion_id = "conversion_id_lookup"
+    ) %>%
+    filter_by_inventory(config, "linkedin")
+
+  cli::cli_alert_info(
+    "  LinkedIn conversion rows after inventory filter: {nrow(raw)}"
+  )
+
+  if (nrow(raw) == 0) {
+    out <- empty_out()
+    archive_save(config, "linkedin_conversions", out)
+    return(out)
+  }
+
+  week_index <- build_week_index(config)
+
+  out <- raw %>%
+    assign_daily_to_weeks(week_index, date_col = "event_date") %>%
+    dplyr::group_by(
+      .data$week_num, .data$weeks_to_end, .data$phase,
+      .data$week_start, .data$week_end,
+      .data$campaign_id, .data$campaign_name,
+      .data$conversion_id, .data$conversion_name,
+      .data$conversion_type, .data$conversion_method,
+      .data$conversion_enabled
+    ) %>%
+    dplyr::summarise(
+      externalWebsiteConversions = sum(
+        .data$externalWebsiteConversions,
+        na.rm = TRUE
+      ),
+      externalWebsitePostClickConversions = sum(
+        .data$externalWebsitePostClickConversions,
+        na.rm = TRUE
+      ),
+      externalWebsitePostViewConversions = sum(
+        .data$externalWebsitePostViewConversions,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(channel = "linkedin") %>%
+    dplyr::select(
+      .data$week_num,
+      .data$weeks_to_end,
+      .data$phase,
+      .data$week_start,
+      .data$week_end,
+      .data$channel,
+      .data$campaign_id,
+      .data$campaign_name,
+      .data$conversion_id,
+      .data$conversion_name,
+      .data$conversion_type,
+      .data$conversion_method,
+      .data$conversion_enabled,
+      .data$externalWebsiteConversions,
+      .data$externalWebsitePostClickConversions,
+      .data$externalWebsitePostViewConversions
+    )
+
+  archive_save(config, "linkedin_conversions", out)
   out
 }
