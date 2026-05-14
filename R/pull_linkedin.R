@@ -194,6 +194,99 @@ fetch_linkedin_campaign_names <- function(campaign_ids, config, bearer_token) {
     dplyr::filter(.data$campaign_id_lookup %in% campaign_ids)
 }
 
+#' @noRd
+fetch_linkedin_all_campaign_names <- function(config, bearer_token) {
+
+  li_cfg      <- config$linkedin
+  account_id  <- li_cfg$account_id
+  api_version <- li_cfg$api_version %||% "202509"
+
+  campaign_names <- tibble::tibble(
+    campaign_id_lookup = character(),
+    campaign_name      = character()
+  )
+  next_page_token <- NULL
+
+  repeat {
+    query_string <- paste0(
+      "q=search",
+      "&pageSize=200",
+      if (!is.null(next_page_token)) {
+        paste0("&pageToken=", utils::URLencode(next_page_token, reserved = TRUE))
+      } else ""
+    )
+
+    url <- paste0(
+      li_url_base(),
+      "/adAccounts/", account_id,
+      "/adCampaigns?", query_string
+    )
+
+    resp <- httr::GET(
+      url,
+      httr::add_headers(.headers = li_headers(bearer_token, api_version))
+    )
+    parsed <- parse_linkedin_content(resp)
+
+    if (httr::status_code(resp) >= 300 || is.null(parsed$parsed$elements)) {
+      cli::cli_alert_warning(
+        "LinkedIn campaign discovery failed. Raw body starts: {substr(parsed$raw_text, 1, 200)}"
+      )
+      return(campaign_names)
+    }
+
+    page_names <- parsed$parsed$elements %>%
+      purrr::map_dfr(function(el) {
+        tibble::tibble(
+          campaign_id_lookup = as.character(el$id   %||% NA_character_),
+          campaign_name      = as.character(el$name %||% NA_character_)
+        )
+      }) %>%
+      dplyr::filter(!is.na(.data$campaign_id_lookup),
+                    !is.na(.data$campaign_name))
+
+    campaign_names <- dplyr::bind_rows(campaign_names, page_names) %>%
+      dplyr::distinct()
+
+    next_page_token <- parsed$parsed$metadata$nextPageToken %||% NULL
+    if (is.null(next_page_token)) break
+  }
+
+  campaign_names
+}
+
+#' @noRd
+resolve_linkedin_scope <- function(config, bearer_token,
+                                   campaign_name_groups = NULL) {
+  li_cfg <- config$linkedin
+
+  if (is.null(campaign_name_groups)) {
+    return(list(
+      campaign_groups = li_cfg$campaign_groups %||% character(),
+      campaign_ids = li_cfg$campaigns %||% character()
+    ))
+  }
+
+  campaigns <- fetch_linkedin_all_campaign_names(config, bearer_token) %>%
+    filter_campaign_names(campaign_name_groups, "campaign_name")
+
+  if (nrow(campaigns) == 0) {
+    cli::cli_alert_warning(
+      "No LinkedIn campaigns matched the supplied campaign-name filter."
+    )
+    return(list(campaign_groups = character(), campaign_ids = character()))
+  }
+
+  cli::cli_alert_info(
+    "LinkedIn campaign-name filter matched {nrow(campaigns)} campaign{?s}."
+  )
+
+  list(
+    campaign_groups = character(),
+    campaign_ids = campaigns$campaign_id_lookup
+  )
+}
+
 ## ---- Helpers: conversion lookup -------------------------------------------
 
 #' @noRd
@@ -361,14 +454,16 @@ run_linkedin_request <- function(scope_param, scope_urns, config, bearer_token,
 ## grain. This intentionally returns only conversion metrics, not spend/click
 ## metrics, because adding conversion as a pivot changes the row grain.
 run_linkedin_conversion_request <- function(scope_param, scope_urns, config,
-                                            bearer_token, debug = FALSE) {
+                                            bearer_token, debug = FALSE,
+                                            date_from = config$start_date,
+                                            date_to = config$end_date) {
 
   li_cfg      <- config$linkedin
   api_version <- li_cfg$api_version %||% "202509"
   account_id  <- li_cfg$account_id
 
-  start_d <- config$start_date
-  end_d   <- config$end_date
+  start_d <- as.Date(date_from)
+  end_d   <- as.Date(date_to)
 
   account_urn <- paste0("urn:li:sponsoredAccount:", account_id)
 
@@ -566,7 +661,9 @@ fetch_li_scope <- function(scope_label, scope_value, config, bearer_token,
 
 #' @noRd
 fetch_li_conversion_scope <- function(scope_label, scope_value, config,
-                                      bearer_token, debug = FALSE) {
+                                      bearer_token, debug = FALSE,
+                                      date_from = config$start_date,
+                                      date_to = config$end_date) {
 
   scope_param <- switch(
     scope_label,
@@ -587,7 +684,8 @@ fetch_li_conversion_scope <- function(scope_label, scope_value, config,
 
   result <- tryCatch(
     run_linkedin_conversion_request(scope_param, urn, config, bearer_token,
-                                    debug = debug),
+                                    debug = debug, date_from = date_from,
+                                    date_to = date_to),
     error = function(e) {
       cli::cli_alert_warning(
         "LinkedIn conversion request failed for {scope_label}={scope_value}: {conditionMessage(e)}"
@@ -797,17 +895,32 @@ pull_linkedin <- function(config, refresh = FALSE, debug = FALSE) {
 #' @param debug   If `TRUE`, prints the full request URL and the first 500
 #'   chars of the response body for every scope. Useful for diagnosing
 #'   empty-result cases.
+#' @param date_from,date_to Date range to pull. Defaults to the campaign
+#'   config's start and end dates.
+#' @param campaign_name_groups Optional token groups passed to
+#'   [match_campaign_name()]. When supplied, LinkedIn campaigns are discovered
+#'   by name from the ad account instead of relying on configured campaign
+#'   groups.
 #'
 #' @return A weekly tibble with campaign and conversion-rule identifiers plus
 #'   `externalWebsiteConversions`, `externalWebsitePostClickConversions`, and
 #'   `externalWebsitePostViewConversions`.
 #'
 #' @export
-pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
+pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE,
+                                      date_from = config$start_date,
+                                      date_to = config$end_date,
+                                      campaign_name_groups = NULL) {
 
   stopifnot(inherits(config, "campaign_config"))
 
-  cached <- archive_load(config, "linkedin_conversions", refresh = refresh)
+  use_archive <- identical(as.Date(date_from), as.Date(config$start_date)) &&
+    identical(as.Date(date_to), as.Date(config$end_date))
+  cached <- if (use_archive) {
+    archive_load(config, "linkedin_conversions", refresh = refresh)
+  } else {
+    NULL
+  }
   if (!is.null(cached)) return(cached)
 
   li_cfg <- config$linkedin
@@ -841,35 +954,49 @@ pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
       "LinkedIn {.field account_id} not set in config. Returning empty tibble."
     )
     out <- empty_out()
-    archive_save(config, "linkedin_conversions", out)
+    if (use_archive) archive_save(config, "linkedin_conversions", out)
     return(out)
   }
 
-  if (length(campaign_groups) == 0 && length(campaign_ids) == 0) {
+  if (is.null(campaign_name_groups) &&
+      length(campaign_groups) == 0 && length(campaign_ids) == 0) {
     cli::cli_alert_warning(
       "LinkedIn config has neither {.field campaign_groups} nor {.field campaigns}. Returning empty tibble."
     )
     out <- empty_out()
-    archive_save(config, "linkedin_conversions", out)
+    if (use_archive) archive_save(config, "linkedin_conversions", out)
     return(out)
   }
 
   ensure_linkedin_deps()
   bearer_token <- get_linkedin_access_token(config)
+  scope <- resolve_linkedin_scope(config, bearer_token, campaign_name_groups)
+  campaign_groups <- scope$campaign_groups
+  campaign_ids <- scope$campaign_ids
+
+  if (length(campaign_groups) == 0 && length(campaign_ids) == 0) {
+    out <- empty_out()
+    if (use_archive) archive_save(config, "linkedin_conversions", out)
+    return(out)
+  }
 
   cli::cli_alert_info(
-    "Pulling LinkedIn conversions: {config$start_date} \u2192 {config$end_date} (account {account_id}, {length(campaign_groups)} group{?s}, {length(campaign_ids)} campaign{?s})"
+    "Pulling LinkedIn conversions: {as.Date(date_from)} \u2192 {as.Date(date_to)} (account {account_id}, {length(campaign_groups)} group{?s}, {length(campaign_ids)} campaign{?s})"
   )
 
   raw_groups <- purrr::map_dfr(
     campaign_groups,
     function(g) fetch_li_conversion_scope("campaign_group_id", g, config,
-                                          bearer_token, debug = debug)
+                                          bearer_token, debug = debug,
+                                          date_from = date_from,
+                                          date_to = date_to)
   )
   raw_campaigns <- purrr::map_dfr(
     campaign_ids,
     function(c) fetch_li_conversion_scope("campaign_id", c, config,
-                                          bearer_token, debug = debug)
+                                          bearer_token, debug = debug,
+                                          date_from = date_from,
+                                          date_to = date_to)
   )
 
   if (nrow(raw_campaigns) > 0 && length(campaign_ids) > 0) {
@@ -885,7 +1012,7 @@ pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
       "LinkedIn returned no usable conversion rows across all scopes."
     )
     out <- empty_out()
-    archive_save(config, "linkedin_conversions", out)
+    if (use_archive) archive_save(config, "linkedin_conversions", out)
     return(out)
   }
 
@@ -926,7 +1053,7 @@ pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
 
   if (nrow(raw) == 0) {
     out <- empty_out()
-    archive_save(config, "linkedin_conversions", out)
+    if (use_archive) archive_save(config, "linkedin_conversions", out)
     return(out)
   }
 
@@ -977,6 +1104,6 @@ pull_linkedin_conversions <- function(config, refresh = FALSE, debug = FALSE) {
       .data$externalWebsitePostViewConversions
     )
 
-  archive_save(config, "linkedin_conversions", out)
+  if (use_archive) archive_save(config, "linkedin_conversions", out)
   out
 }

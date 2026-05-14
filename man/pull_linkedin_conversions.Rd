@@ -4,7 +4,14 @@
 \alias{pull_linkedin_conversions}
 \title{Pull LinkedIn conversions by conversion rule}
 \usage{
-pull_linkedin_conversions(config, refresh = FALSE, debug = FALSE)
+pull_linkedin_conversions(
+  config,
+  refresh = FALSE,
+  debug = FALSE,
+  date_from = config$start_date,
+  date_to = config$end_date,
+  campaign_name_groups = NULL
+)
 }
 \arguments{
 \item{config}{A \code{campaign_config} object. Required: \code{linkedin.account_id}.
@@ -18,6 +25,14 @@ Optional: \code{linkedin.api_version} (default \code{"202509"}),
 \item{debug}{If \code{TRUE}, prints the full request URL and the first 500
 chars of the response body for every scope. Useful for diagnosing
 empty-result cases.}
+
+\item{date_from, date_to}{Date range to pull. Defaults to the campaign
+config's start and end dates.}
+
+\item{campaign_name_groups}{Optional token groups passed to
+\code{\link[=match_campaign_name]{match_campaign_name()}}. When supplied, LinkedIn campaigns are discovered
+by name from the ad account instead of relying on configured campaign
+groups.}
 }
 \value{
 A weekly tibble with campaign and conversion-rule identifiers plus
